@@ -1,11 +1,10 @@
 import { useRef, useState } from 'react';
-import Papa from 'papaparse';
+// import Papa from 'papaparse';
 
 const App = () => {
   const fileInputRef = useRef(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [selectedFileName, setSelectedFileName] = useState('');
-  const maxChunkSize = 1024 * 1024;
 
   const handleFileChange = (event) => {
     const file = event.target.files[0];
@@ -17,63 +16,66 @@ const App = () => {
     fileInputRef.current.click();
   };
 
+  const uploadChunk = async (chunk, selectedFile, endIndex, retries = 3) => {
+    const fileExtension = selectedFile.name.split('.').pop();
+    const query = `
+    mutation ProcessChunk($data: [Uint8Array!]!, $completed: Boolean!, $extension: String!) {
+      processChunk(data: $data, completed: $completed, extension: $extension) {
+        success
+        message
+      }
+    }
+  `;
+
+    try {
+      const res = await fetch("http://localhost:4001/graphql", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query,
+          variables: { data: [Array.from(new Uint8Array(chunk))], completed: endIndex === selectedFile.size || false, extension: fileExtension },
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Upload failed with status: ${res.status}`);
+      }
+
+      const data = await res.json();
+      console.log(`Chunk upload returned:`, data);
+    } catch (error) {
+      if (retries > 0) {
+        await uploadChunk(chunk, selectedFile, endIndex, retries - 1);
+      } else {
+        console.error('Failed to upload chunk: ', error);
+      }
+    }
+  };
+
   const handleUpload = async () => {
     if (!selectedFile) {
       console.error("No file selected");
       return;
     }
+    const chunkSize = 512 * 1024;
+    let start = 0;
 
-    const fileText = await selectedFile.text();
-    console.log(fileText)
-    console.log(fileText.length)
-    let startIndex = 0;
-
-    while (startIndex < fileText.length) {
-      const endIndex = Math.min(startIndex + maxChunkSize, fileText.length);
-      const chunkText = fileText.slice(startIndex, endIndex);
-
-      Papa.parse(chunkText, {
-        complete: async (results) => {
-          const chunk = results.data;
-          const variables = { data: chunk, completed: endIndex === fileText.length || false };
-
-          const query = `
-            mutation ProcessCSV($data: [[String]]!, $completed: Boolean!) {
-              processCSV(data: $data, completed: $completed) {
-                success
-                message
-              }
-            }
-          `;
-
-          try {
-            const res = await fetch("http://localhost:4001/graphql", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                query,
-                variables,
-              }),
-            });
-
-            if (!res.ok) {
-              throw new Error(`Upload failed with status: ${res.status}`);
-            }
-
-            const data = await res.json();
-            console.log(`Chunk upload returned:`, data);
-          } catch (error) {
-            console.error(`Chunk upload error:`, error);
-          }
-        },
-        error: (error) => {
-          console.error("CSV parsing error:", error);
-        }
+    while (start < selectedFile.size) {
+      const reader = new FileReader();
+      reader.readAsArrayBuffer(selectedFile.slice(start, start + chunkSize));
+      await new Promise((resolve, reject) => {
+        reader.onload = async (event) => {
+          await uploadChunk(event.target.result, selectedFile, Math.min(start + chunkSize, selectedFile.size));
+          resolve();
+        };
+        reader.onerror = (error) => {
+          console.error("Error reading file chunk:", error);
+          reject(error);
+        };
       });
-
-      startIndex = endIndex;
+      start += chunkSize;
     }
   };
 
@@ -113,7 +115,7 @@ const App = () => {
         type="file"
         onChange={handleFileChange}
         className="hidden"
-        accept=".xlsx,.xls,.csv"
+        // accept=".xlsx,.xls,.csv"
       />
       {selectedFileName && <button className='bg-blue-600 text-white py-2 px-4 m-4 rounded-md cursor-pointer' onClick={handleUpload}>Send</button>}
       <button className='bg-blue-600 text-white py-2 px-4 rounded-md cursor-pointer' onClick={handleTest}>Test</button>
